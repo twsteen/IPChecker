@@ -26,6 +26,9 @@ from pathlib import Path
 from collections import defaultdict
 
 
+OUTPUT_DIR = Path("output")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 ##############################################################################
 # REGEX DEFINITIONS
 ##############################################################################
@@ -40,8 +43,13 @@ COMPONENT_RE = re.compile(
     re.IGNORECASE
 )
 
+COMPONENT_INSTANCE_RE = re.compile(
+    r'(\w+)\s*:\s*(?:component\s+)?(\w+)\s*(?:generic\s+map\s*\(.*?\)\s*)?\s*port\s+map',
+    re.IGNORECASE | re.DOTALL
+)
+
 DIRECT_ENTITY_RE = re.compile(
-    r'(\w+)\s*:\s*entity\s+\w+\.(\w+)',
+    r'(\w+)\s*:\s*entity\s+(?:\w+\.)?(\w+)',
     re.IGNORECASE
 )
 
@@ -91,21 +99,57 @@ def find_line_number(text, position):
     return text.count('\n', 0, position) + 1
 
 
+def load_vhdl_files(vhdl_files):
+
+    file_contents = {}
+
+    for file in vhdl_files:
+
+        try:
+
+            text = file.read_text(
+                encoding="utf-8",
+                errors="ignore"
+            )
+
+            file_contents[file] = strip_comments(text)
+
+        except Exception as ex:
+
+            print(
+                f"ERROR reading {file}: {ex}"
+            )
+
+    return file_contents
+
 ##############################################################################
 # STEP 1 - FIND FILES
 ##############################################################################
 
 def is_excluded(file):
 
-    return "sim_only" in {
-        part.lower()
-        for part in file.parts
+    excluded_dirs = {
+        "sim_only"
     }
+
+    return any(
+        part.lower() in excluded_dirs
+        for part in file.parts
+    )
 
 
 def find_vhdl_files(search_dirs):
 
-    files = []
+    files = set()
+
+    extra_file = Path(
+        r"H:\ddm\hecb_odf\qsys\hecb_nios\generated\syn\synthesis\hecb_nios.vhd"
+    )
+
+    if extra_file.exists():
+        files.add(extra_file)
+    else:
+        print(f"Error: Extra file does not exists {extra_file}")
 
     for directory in search_dirs:
 
@@ -118,51 +162,36 @@ def find_vhdl_files(search_dirs):
         for file in root.rglob("*.vhd"):
 
             if not is_excluded(file):
-                files.append(file)
+                files.add(file)
 
-        for file in root.rglob("*.vhdl"):
+    print(f"Found {len(files)} VHDL files")
 
-            if not is_excluded(file):
-                files.append(file)
-
-    return sorted(set(files))
+    return sorted(files)
 
 
 ##############################################################################
 # STEP 2 - PARSE ENTITIES
 ##############################################################################
 
-def parse_entities(vhdl_files):
+def parse_entities(file_contents):
 
     entities = {}
 
-    for file in vhdl_files:
+    for file, text in file_contents.items():
 
-        try:
+        for match in ENTITY_RE.finditer(text):
 
-            text = file.read_text(
-                encoding="utf-8",
-                errors="ignore"
+            entity_name = match.group(1).lower()
+            line = find_line_number(
+                text,
+                match.start()
             )
 
-            text = strip_comments(text)
-
-            for match in ENTITY_RE.finditer(text):
-
-                entity_name = match.group(1).lower()
-                line = find_line_number(
-                    text,
-                    match.start()
-                )
-
-                entities[entity_name] = EntityInfo(
-                    entity_name,
-                    file,
-                    line
-                )
-
-        except Exception as ex:
-            print(f"ERROR reading {file}: {ex}")
+            entities[entity_name] = EntityInfo(
+                entity_name,
+                file,
+                line
+            )
 
     return entities
 
@@ -202,28 +231,16 @@ def parse_components(vhdl_files):
 # STEP 4 - PARSE INSTANTIATIONS
 ##############################################################################
 
-def parse_instantiations(vhdl_files,
-                         entities):
+def parse_instantiations(file_contents, entities):
 
+    seen_instances = set()
     usages = defaultdict(list)
 
     hierarchy = defaultdict(set)
 
     entity_names = set(entities.keys())
 
-    for file in vhdl_files:
-
-        try:
-
-            text = file.read_text(
-                encoding="utf-8",
-                errors="ignore"
-            )
-
-            text = strip_comments(text)
-
-        except Exception:
-            continue
+    for file, text in file_contents.items():
 
         parent_entities = []
 
@@ -264,15 +281,26 @@ def parse_instantiations(vhdl_files,
                 line
             )
 
+            key = (
+                str(file),
+                line,
+                entity_name
+            )
+
+            if key in seen_instances:
+                continue
+
+            seen_instances.add(key)
+
             usages[entity_name].append(inst)
 
             hierarchy[current_parent].add(
                 entity_name
             )
 
-        # component style
+        # component instantiations
 
-        for match in SIMPLE_INSTANCE_RE.finditer(text):
+        for match in COMPONENT_INSTANCE_RE.finditer(text):
 
             instance_name = match.group(1)
             target = match.group(2).lower()
@@ -294,6 +322,17 @@ def parse_instantiations(vhdl_files,
                 file,
                 line
             )
+
+            key = (
+                str(file),
+                line,
+                target
+            )
+
+            if key in seen_instances:
+                continue
+
+            seen_instances.add(key)
 
             usages[target].append(inst)
 
@@ -477,6 +516,75 @@ def export_dot(filename, hierarchy):
         f"DOT exported: {filename}"
     )
 
+def save_report(filename,
+                entities,
+                usages):
+
+    with open(filename, "w", encoding="utf-8") as f:
+
+        f.write("=" * 80 + "\n")
+        f.write("ENTITY USAGE REPORT\n")
+        f.write("=" * 80 + "\n")
+
+        for entity_name in sorted(entities):
+
+            e = entities[entity_name]
+
+            f.write("\n")
+            f.write(f"Entity : {entity_name}\n")
+            f.write(f"Defined: {e.file}:{e.line}\n")
+
+            users = usages.get(
+                entity_name,
+                []
+            )
+
+            if not users:
+                f.write("Used   : UNUSED\n")
+                continue
+
+            f.write(
+                f"Used in {len(users)} instance(s)\n"
+            )
+
+            for inst in users:
+
+                f.write(
+                    f"  {inst.file}:{inst.line}"
+                    f" ({inst.instance_name})\n"
+                )
+
+    print(
+        f"Report saved to {filename}"
+    )
+
+def save_unused(filename,
+                entities,
+                usages):
+
+    unused_count = 0
+
+    with open(filename, "w", encoding="utf-8") as f:
+
+        f.write("UNUSED ENTITIES\n")
+        f.write("=" * 80 + "\n")
+
+        for entity_name in sorted(entities):
+
+            if entity_name not in usages:
+
+                unused_count += 1
+                f.write(f"{entity_name}\n")
+
+        f.write("\n")
+        f.write(
+            f"Total unused: {unused_count}\n"
+        )
+
+    print(
+        f"Unused entity list saved to {filename}"
+    )
+
 
 ##############################################################################
 # MAIN
@@ -492,8 +600,7 @@ def main():
     )
 
     SEARCH_DIRS = [
-        r"H:\ddm\hecb_odf\hdl",
-        r"H:\ddm\hecb_odf\qsys\hecb_nios\generated\syn\synthesis"
+        r"H:\ddm\hecb_odf\hdl"
     ]
 
     parser.add_argument(
@@ -522,8 +629,12 @@ def main():
         f"{len(vhdl_files)} VHDL files"
     )
 
-    entities = parse_entities(
+    file_contents = load_vhdl_files(
         vhdl_files
+    )
+
+    entities = parse_entities(
+        file_contents
     )
 
     print(
@@ -533,12 +644,24 @@ def main():
 
     usages, hierarchy = (
         parse_instantiations(
-            vhdl_files,
+            file_contents,
             entities
         )
     )
 
     print_report(
+        entities,
+        usages
+    )
+
+    save_report(
+        OUTPUT_DIR / "entity_usage_report.txt",
+        entities,
+        usages
+    )
+
+    save_unused(
+        OUTPUT_DIR / "unused_entities.txt",
         entities,
         usages
     )
