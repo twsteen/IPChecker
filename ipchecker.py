@@ -25,9 +25,23 @@ import argparse
 from pathlib import Path
 from collections import defaultdict
 
-
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+##############################################################################
+# USER INPUTS
+##############################################################################
+EXCLUDED_ENTITIES = {
+    "top_hecb_odf"
+}
+
+extra_file = Path(
+    r"H:\ddm\hecb_odf\qsys\hecb_nios\generated\syn\synthesis\hecb_nios.vhd"
+)
+
+SEARCH_DIRS = {
+    r"H:\ddm\hecb_odf\hdl"
+}
 
 ##############################################################################
 # REGEX DEFINITIONS
@@ -141,10 +155,6 @@ def is_excluded(file):
 def find_vhdl_files(search_dirs):
 
     files = set()
-
-    extra_file = Path(
-        r"H:\ddm\hecb_odf\qsys\hecb_nios\generated\syn\synthesis\hecb_nios.vhd"
-    )
 
     if extra_file.exists():
         files.add(extra_file)
@@ -404,7 +414,10 @@ def print_unused(
 
     for entity_name in sorted(entities):
 
-        if entity_name not in usages:
+        if (
+            entity_name not in usages and
+            entity_name not in EXCLUDED_ENTITIES
+        ):
 
             unused += 1
             print(entity_name)
@@ -566,12 +579,16 @@ def save_unused(filename,
 
     with open(filename, "w", encoding="utf-8") as f:
 
+        f.write("=" * 80 + "\n")
         f.write("UNUSED ENTITIES\n")
         f.write("=" * 80 + "\n")
 
         for entity_name in sorted(entities):
 
-            if entity_name not in usages:
+            if (
+                entity_name not in usages and
+                entity_name not in EXCLUDED_ENTITIES
+                ):
 
                 unused_count += 1
                 f.write(f"{entity_name}\n")
@@ -599,9 +616,7 @@ def main():
         action="store_true"
     )
 
-    SEARCH_DIRS = [
-        r"H:\ddm\hecb_odf\hdl"
-    ]
+
 
     parser.add_argument(
         "--dot",
